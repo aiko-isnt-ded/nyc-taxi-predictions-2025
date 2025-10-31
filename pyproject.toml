@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "databricks-cli>=0.18.0",
     "databricks-sdk>=0.67.0",
+    "fastapi[standard]>=0.118.0",
     "fastparquet>=2024.11.0",
     "jupyter>=1.1.1",
     "jupyterlab>=4.4.9",
@@ -18,5 +19,6 @@ dependencies = [
     "prefect>=3.4.25",
     "pyarrow>=21.0.0",
     "scikit-learn>=1.7.2",
+    "streamlit>=1.51.0",
     "xgboost>=3.1.1",
 ]
