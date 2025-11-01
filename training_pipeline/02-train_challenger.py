@@ -66,6 +66,9 @@ def add_features(df_train: pd.DataFrame, df_val: pd.DataFrame):
     X_val = dv.transform(val_dicts)
     y_val = df_val["duration"].values
 
+    training_dataset = mlflow.data.from_numpy(X_train.data, targets=y_train, name="green_tripdata_2025-01")
+    validation_dataset = mlflow.data.from_numpy(X_val.data, targets=y_val, name="green_tripdata_2025-02")
+
     return X_train, X_val, y_train, y_val, dv
 
 @task(name="RandomForest Tunning and Training")
@@ -319,6 +322,106 @@ def run_gradient_boosting(X_train, y_train, X_val, y_val, dv):
     )
     return None
 
+@task(name='Register Models & Challenger Label')
+def register_challenger(EXPERIMENT_NAME):
+    """
+    Register Both Models and Select a Challenger
+    """
+    # Load the Client for model registration
+    client = MlflowClient()
+
+    # Run structure
+    runs = mlflow.search_runs(
+    experiment_names=[EXPERIMENT_NAME],
+    order_by=["metrics.rmse ASC"],
+    output_format="list"
+    )
+
+    # Separate the runs by model type
+    random_forest_runs = []
+    gradient_boosting_runs = []
+
+    for run in runs:
+        run_name = run.info.run_name
+        if run_name:
+            if 'RandomForest' in run_name:
+                random_forest_runs.append(run)
+            elif 'GradientBoosting' in run_name:
+                gradient_boosting_runs.append(run)
+
+    # Get the best run for each model type
+    best_runs = {}
+
+    if len(random_forest_runs) > 0:
+        best_rf_run = random_forest_runs[0]
+        best_runs['RandomForest'] = best_rf_run
+        print("Found Best RandomForest Run:")
+        print(f"Run ID: {best_rf_run.info.run_id}")
+        print(f"RMSE: {best_rf_run.data.metrics['rmse']}")
+        print(f"Params: {best_rf_run.data.params}")
+    else:
+        print("⚠️ No RandomForest runs found.")
+
+    if len(gradient_boosting_runs) > 0:
+        best_gb_run = gradient_boosting_runs[0]
+        best_runs['GradientBoosting'] = best_gb_run
+        print("\nFound Best GradientBoosting Run:")
+        print(f"Run ID: {best_gb_run.info.run_id}")
+        print(f"RMSE: {best_gb_run.data.metrics['rmse']}")
+        print(f"Params: {best_gb_run.data.params}")
+    else:
+        print("⚠️ No GradientBoosting runs found.")
+
+    # Define model name
+    model_name = 'workspace.default.nyc-taxi-model-prefect'
+
+    # Register both models 
+    registered_versions = {}
+    for model_type, run in best_runs.items():
+        try:
+            result = mlflow.register_model(
+                model_uri=f"runs:/{run.info.run_id}/model",
+                name=model_name
+            )
+            registered_versions[model_type] = result.version
+            print(f"\n✅ Successfully registered {model_type} model as version: {result.version}")
+        except Exception as e:
+            print(f"\n❌ Failed to register {model_type} model: {str(e)}")
+
+    # Determine the best Challenger candidate between RandomForest and GradientBoosting
+    challenger_candidates = []
+
+    if len(random_forest_runs) > 0:
+        challenger_candidates.append(('RandomForest', random_forest_runs[0]))
+    if len(gradient_boosting_runs) > 0:
+        challenger_candidates.append(('GradientBoosting', gradient_boosting_runs[0]))
+
+    # Select the best Challenger (lowest RMSE)
+    if len(challenger_candidates) > 0:
+        # Sort by RMSE to find the best one
+        challenger_candidates.sort(key=lambda x: x[1].data.metrics['rmse'])
+        best_challenger_type, best_challenger_run = challenger_candidates[0]
+        
+        print(f"🏆 Selected Challenger: {best_challenger_type}")
+        print(f"Run ID: {best_challenger_run.info.run_id}")
+        print(f"RMSE: {best_challenger_run.data.metrics['rmse']}")
+        
+        # Register and tag as Challenger
+        challenger_version = registered_versions.get(best_challenger_type)
+        
+        # If there's a challenger, add the alias
+        if challenger_version:
+            client.set_registered_model_alias(
+                name=model_name,
+                alias="Challenger",
+                version=challenger_version
+            )
+            print(f"✅ Set '{best_challenger_type}' (version {challenger_version}) as Challenger")
+        else:
+            print(f"❌ Could not find registered version for {best_challenger_type}")
+    else:
+        print("❌ No suitable Challenger candidates found")
+
 # =======================
 # Pipeline Flow
 # =======================
@@ -352,4 +455,11 @@ def main_flow(year: int, month_train: str, month_val: str) -> None:
     run_gradient_boosting(X_train, X_val, y_train, y_val, dv)
 
     # Model Registry
-    model_registry(EXPERIMENT_NAME)
+    register_challenger(EXPERIMENT_NAME)
+
+# =======================
+# Run
+# =======================
+
+if __name__ == "__main__":
+    main_flow(year=2025, month_train="01", month_val="02")
