@@ -66,9 +66,6 @@ def add_features(df_train: pd.DataFrame, df_val: pd.DataFrame):
     X_val = dv.transform(val_dicts)
     y_val = df_val["duration"].values
 
-    training_dataset = mlflow.data.from_numpy(X_train.data, targets=y_train, name="green_tripdata_2025-01")
-    validation_dataset = mlflow.data.from_numpy(X_val.data, targets=y_val, name="green_tripdata_2025-02")
-
     return X_train, X_val, y_train, y_val, dv
 
 @task(name="RandomForest Tunning and Training")
@@ -197,7 +194,7 @@ def run_random_forest(X_train, X_val, y_train, y_val, dv):
     return None
 
 @task(name="GradientBoosting Tunning and Training")
-def run_gradient_boosting(X_train, y_train, X_val, y_val, dv):
+def run_gradient_boosting(X_train, X_val, y_train, y_val, dv):
     """Tune Hyperparameters and Train GradientBoosting model"""
 
     # Definir la función objetivo para Optuna
