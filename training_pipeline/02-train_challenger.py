@@ -61,12 +61,35 @@ def add_features(df_train: pd.DataFrame, df_val: pd.DataFrame):
     X_train = dv.fit_transform(train_dicts)
     y_train = df_train["duration"].values
 
-    # Test
+    # Validation
     val_dicts = df_val[categorical + numerical].to_dict(orient="records")
     X_val = dv.transform(val_dicts)
     y_val = df_val["duration"].values
 
     return X_train, X_val, y_train, y_val, dv
+
+@task(name='Add Features for Testing')
+def add_test_features(df_test: pd.DataFrame, dv):
+    """Add features to test df for model comparison"""
+    df_test["PU_DO"] = df_test["PULocationID"] + "_" + df_test["DOLocationID"]
+
+    categorical = ["PU_DO"]             #['PULocationID', 'DOLocationID'] Combined
+    numerical = ["trip_distance"]
+
+    # Test
+    test_dicts = df_test[categorical + numerical].to_dict(orient="records")
+    X_test = dv.transform(test_dicts)
+    y_test = df_test["duration"].values
+
+    # Convert sparse matrix to DataFrame with proper feature names
+    if hasattr(X_test, 'toarray'):
+        X_test_dense = X_test.toarray()
+        feature_names = dv.get_feature_names_out()  # Get actual feature names from DictVectorizer
+        X_test_df = pd.DataFrame(X_test_dense, columns=feature_names)
+    else:
+        X_test_df = X_test
+
+    return X_test_df, y_test
 
 @task(name="RandomForest Tunning and Training")
 def run_random_forest(X_train, X_val, y_train, y_val, dv):
@@ -419,16 +442,73 @@ def register_challenger(EXPERIMENT_NAME):
     else:
         print("❌ No suitable Challenger candidates found")
 
+@task(name='Evaluate Champion & Challenger Models')
+def evaluate_champion_challenger(X_test, y_test):
+    """
+    Evaluate Champion & Challenger Models and update accordingly
+    """
+
+    model_name = 'workspace.default.nyc-taxi-model-prefect'
+
+    # Load Champion Model
+    model_version_uri = f"models:/{model_name}@Champion"
+    champion_version = mlflow.pyfunc.load_model(model_version_uri)
+    # Predict Champion Model
+    y_pred_champion = champion_version.predict(X_test)
+    rmse_champion = root_mean_squared_error(y_pred_champion, y_test)
+    
+    
+    # Load Challenger Model
+    model_version_uri = f"models:/{model_name}@Challenger"
+    champion_version = mlflow.pyfunc.load_model(model_version_uri)
+    # Predict Challenger Model
+    y_pred_challenger = champion_version.predict(X_test)
+    rmse_challenger = root_mean_squared_error(y_pred_challenger, y_test)
+
+
+    # Evaluate metrics
+    if rmse_challenger < rmse_champion:         # If Challenger is better
+        # Initialize client  
+        client = MlflowClient()
+        
+        # Get the current champion version
+        champion_versions = client.get_model_version_by_alias(model_name, "Champion")
+        current_champion_version = champion_versions.version
+
+        # Get the challenger version
+        challenger_versions = client.get_model_version_by_alias(model_name, "Challenger")
+        challenger_version = challenger_versions.version
+        
+        # Remove Champion label from current champion
+        client.delete_registered_model_alias(model_name, "Champion")
+
+        # Add Champion label to challenger
+        client.set_registered_model_alias(model_name, "Champion", challenger_version)
+        
+        # Update previous Champion Model label
+        client.set_registered_model_alias(model_name, "Ex-Champion", current_champion_version)
+        result = '🎉 Challenger Model HAS improved results. Models have been updated.'
+
+    else:
+        result = '💔 Challenger Model has NOT improved results. No change has been made.'
+
+    return print(result), print(f'\n RMSE Champion: {rmse_champion:.2f}'), print(f'\n RMSE Challenger: {rmse_challenger:.2f}')
+    
+
 # =======================
 # Pipeline Flow
 # =======================
 
 @flow(name="Main Challenger Flow")
-def main_flow(year: int, month_train: str, month_val: str) -> None:
-    """Main training pipeline for Challenger Models (RandomForest and Gradient Boosting)"""
+def main_flow(year: int, month_train: str, month_val: str, month_test: str) -> None:
+    """
+    Main training pipeline for Challenger Models (RandomForest and Gradient Boosting).
+    As well as comparison with Champion model and evaluation.
+    """
 
     train_path = f"../data/green_tripdata_{year}-{month_train}.parquet"
     val_path = f"../data/green_tripdata_{year}-{month_val}.parquet"
+    test_path = f"../data/green_tripdata_{year}-{month_test}.parquet"
     
     # Load .env file and experiment for Databricks
     load_dotenv(override=True)  
@@ -441,9 +521,11 @@ def main_flow(year: int, month_train: str, month_val: str) -> None:
     # Load Data
     df_train = read_data(train_path)
     df_val = read_data(val_path)
+    df_test = read_data(test_path)
 
     # Transform Data
     X_train, X_val, y_train, y_val, dv = add_features(df_train, df_val)
+    X_test, y_test = add_test_features(df_test, dv)
     
     # Tune and Train RandomForest
     run_random_forest(X_train, X_val, y_train, y_val, dv)
@@ -451,12 +533,15 @@ def main_flow(year: int, month_train: str, month_val: str) -> None:
     # Tune and Train Gradient Boosting
     run_gradient_boosting(X_train, X_val, y_train, y_val, dv)
 
-    # Model Registry
+    # Model Registry for Champion Models
     register_challenger(EXPERIMENT_NAME)
+
+    # Evaluate Challenger and Champion Models
+    evaluate_champion_challenger(X_test, y_test)
 
 # =======================
 # Run
 # =======================
 
 if __name__ == "__main__":
-    main_flow(year=2025, month_train="01", month_val="02")
+    main_flow(year=2025, month_train="01", month_val="02", month_test="03")
