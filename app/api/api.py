@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from mlflow import MlflowClient
 from dotenv import load_dotenv
+import pandas as pd
 import os
 
 # ============================
@@ -56,11 +57,29 @@ champion_model = mlflow.pyfunc.load_model(
 # ============================
 
 def preprocess(input_data):
+
     input_dict = {
         'PU_DO': input_data.PULocationID + "_" + input_data.DOLocationID,
         'trip_distance': input_data.trip_distance,
     }
-    return dv.transform(input_dict)
+    X = dv.transform([input_dict])
+
+    # Names depend on sklearn version
+    try:
+        cols = dv.get_feature_names_out()
+    except AttributeError:
+        cols = dv.get_feature_names()
+
+    # 
+    X_df = pd.DataFrame(X.toarray(), columns=cols)
+
+    return X_df
+
+def predict(input_data):
+
+    X_val = preprocess(input_data)
+
+    return champion_model.predict(X_val)
 
 # Prediction
 def predict(input_data):
